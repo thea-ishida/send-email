@@ -8,68 +8,45 @@ SMTP_PORT = 1025
 QTYPE_A = 1
 QTYPE_MX = 15
 
+def _valid_address(address):
+    local, at, domain = address.partition('@')
+    return bool(at and local and domain and '@' not in domain
+                and not any(c.isspace() for c in address))
 
 def parse_email(file_path):
-    """
-    TODO: Read file and return (sender, recipient, subject, body).
-    Validate that sender and recipient include '@'.
-    On any parsing/validation error, raise SystemExit(1).
-    """
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
             content = file.read()
     except (OSError, UnicodeDecodeError):
         raise SystemExit(1)
-
-    parts = content.split('\n\n', 1)
-    if len(parts) != 2:
+ 
+    headers_text, sep, body = content.partition('\n\n')
+    if not sep:
         raise SystemExit(1)
-    
-    headers_text, body = parts
-
-    sender = None
-    recipient = None
-    subject = None
-
+ 
+    headers = {}
     for line in headers_text.split('\n'):
-        line = line.strip()
-        if line.startswith('From:'):
-            sender = line[5:].strip()
-        elif line.startswith('To:'):
-            recipient = line[3:].strip()
-        elif line.startswith('Subject:'):
-            subject = line[8:].strip()
-
-    if sender is None or recipient is None or subject is None:
+        name, colon, value = line.strip().partition(':')
+        if colon:
+            headers[name] = value.strip()
+ 
+    try:
+        sender = headers['From']
+        recipient = headers['To']
+        subject = headers['Subject']
+    except KeyError:
         raise SystemExit(1)
-
-    for address in (sender, recipient):
-        # Reject addresses containing whitespace (e.g., spaces, tabs, etc.)
-        if address.count('@') != 1 or any(c.isspace() for c in address):
-            raise SystemExit(1)
-        
-        local_part, domain_part = address.split('@')
-        if not local_part or not domain_part:
-            raise SystemExit(1)
-        if not local_part or not domain_part:
-            raise SystemExit(1)
-
+ 
+    if not (_valid_address(sender) and _valid_address(recipient)):
+        raise SystemExit(1)
+ 
     return (sender, recipient, subject, body)
 
 
-    
-
 def build_dns_query(id, domain, qtype):
-    """
-    TODO: Build bytes: ID(1) + QNAME + QTYPE(1)
-    QNAME = label_len(1) + label_bytes ... + 0x00
-    """
     try: 
         query_bytes = id.to_bytes(1, byteorder='big')
         labels = domain.rstrip('.').split('.')
-
-        # 2. Construct the QNAME
-        # Split the domain by dots and encode each label with its length prefix
 
         for label in labels:
             if not label:
@@ -78,8 +55,7 @@ def build_dns_query(id, domain, qtype):
             query_bytes += len(encoded_label).to_bytes(1, byteorder='big') + encoded_label
 
         query_bytes += b'\x00'
-        
-        # 3. Add the 1-byte QTYPE
+
         query_bytes += qtype.to_bytes(1, byteorder='big')
         return query_bytes
     
@@ -87,10 +63,6 @@ def build_dns_query(id, domain, qtype):
         raise SystemExit(1)
 
 def send_dns_query(dns_ip, query):
-    """
-    TODO: Send UDP to (dns_ip, 1053), return response bytes (use timeout).
-    On error or timeout, raise SystemExit(1).
-    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(3.0)
@@ -102,7 +74,6 @@ def send_dns_query(dns_ip, query):
         raise SystemExit(1)
 
 def _skip_name(response, offset):
-    """Advance past a label-encoded name. Returns the offset after the 0x00."""
     while True:
         label_len = response[offset]
         offset += 1
@@ -112,13 +83,6 @@ def _skip_name(response, offset):
  
 
 def parse_dns_response(response, expected_id, qtype):
-    """
-    TODO: Validate response[0] == expected_id, parse QNAME echo,
-    read QCODE (0 success / 1 error), then ANSWER_LEN(1) and ANSWER.
-    For MX (qtype=15): ANSWER is label-encoded hostname ending with 0x00.
-    For A  (qtype=1):  ANSWER is 4 bytes IPv4. Return 'a.b.c.d'.
-    On any error, raise SystemExit(1).
-    """
     try:
         if not response or response[0] != expected_id:
             raise SystemExit(1)
@@ -157,7 +121,7 @@ def parse_dns_response(response, expected_id, qtype):
             return ".".join(labels)
         elif qtype == QTYPE_A:
             if answer_length != 4:
-                raise SystemExit(4)
+                raise SystemExit(1)
             return f"{answer[0]}.{answer[1]}.{answer[2]}.{answer[3]}"
         else:
             raise SystemExit(1)
@@ -166,21 +130,10 @@ def parse_dns_response(response, expected_id, qtype):
 
 
 def send_smtp_email(ip, sender, recipient, subject, body):
-    """
-    Connect TCP to (ip, 1025). Exchange lines with '\n' endings:
-    - read '220 ...'
-    - send 'HELO <send_domain>'
-    - 'MAIL FROM: <sender>'
-    - 'RCPT TO: <recipient>'
-    - 'DATA' then body, '.', expect '250'
-    - 'QUIT', expect '221'
-    On any error, raise SystemExit(1).
-    """
     try:
         sender_domain = sender.split('@')[1]
         
         with socket.create_connection((ip, SMTP_PORT), timeout=5.0) as sock:
-            f = sock.makefile('rw', encoding='ascii', newline='\n')
             
             with sock.makefile('rw', encoding='utf-8', newline='\n') as f:
 
@@ -219,12 +172,9 @@ def send_smtp_email(ip, sender, recipient, subject, body):
                 expect(221)
                 
     except (OSError, IndexError, ValueError):
-        # OSError covers socket.error, timeouts and refused connections.
         raise SystemExit(1)
 
 if __name__ == '__main__':
-    # Accept either: script email_file  OR script email_file dns_ip
-
     if len(sys.argv) not in (2, 3):
         raise SystemExit(1)
     file_path = sys.argv[1]
@@ -233,12 +183,12 @@ if __name__ == '__main__':
     sender, recipient, subject, body = parse_email(file_path)
     domain = recipient.split('@')[1]
 
-    # mx_query = build_dns_query(18, domain, 15)    # MX
-    # mx_response = send_dns_query(dns_ip, mx_query)
-    # mx_host = parse_dns_response(mx_response, 18, 15)
+    mx_query = build_dns_query(18, domain, QTYPE_MX)    # MX
+    mx_response = send_dns_query(dns_ip, mx_query)
+    mx_host = parse_dns_response(mx_response, 18, 15)
 
-    # a_query = build_dns_query(19, mx_host, 1)     # A
-    # a_response = send_dns_query(dns_ip, a_query)
-    # ip = parse_dns_response(a_response, 19, 1)
+    a_query = build_dns_query(19, mx_host, QTYPE_A)     # A
+    a_response = send_dns_query(dns_ip, a_query)
+    ip = parse_dns_response(a_response, 19, 1)
 
-    # send_smtp_email(ip, sender, recipient, subject, body)
+    send_smtp_email(ip, sender, recipient, subject, body)
