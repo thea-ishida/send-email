@@ -95,7 +95,22 @@ def send_dns_query(dns_ip, query):
     TODO: Send UDP to (dns_ip, 1053), return response bytes (use timeout).
     On error or timeout, raise SystemExit(1).
     """
-    raise NotImplementedError
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # Set a timeout for the socket operations (e.g., 3 seconds)
+            sock.settimeout(3.0)
+            
+            # Send the query to the specified DNS IP on port 1053
+            sock.sendto(query, (dns_ip, 1053))
+            
+            # Receive the response (4096 bytes is more than enough for a DNS packet)
+            response, _ = sock.recvfrom(4096)
+            
+            return response
+            
+    except (OSError):
+        # On any socket error or timeout, raise SystemExit(1)
+        raise SystemExit(1)
 
 def parse_dns_response(response, expected_id, qtype):
     """
@@ -105,7 +120,56 @@ def parse_dns_response(response, expected_id, qtype):
     For A  (qtype=1):  ANSWER is 4 bytes IPv4. Return 'a.b.c.d'.
     On any error, raise SystemExit(1).
     """
-    raise NotImplementedError
+    try:
+        # Validate ID[cite: 1, 2]
+        if not response or response[0] != expected_id:
+            raise SystemExit(1)
+            
+        offset = 1
+        
+        # Parse and skip QNAME echo[cite: 1, 2]
+        while True:
+            label_len = response[offset]
+            offset += 1
+            if label_len == 0:
+                break
+            offset += label_len
+            
+        # Read QCODE[cite: 1, 2]
+        qcode = response[offset]
+        offset += 1
+        
+        if qcode != 0:
+            raise SystemExit(1)
+            
+        # Read ANSWER_LEN[cite: 1, 2]
+        ans_len = response[offset]
+        offset += 1
+        
+        # Parse ANSWER based on QTYPE[cite: 1]
+        if qtype == 15:  # MX
+            labels = []
+            while True:
+                label_len = response[offset]
+                offset += 1
+                if label_len == 0:
+                    break
+                labels.append(response[offset:offset+label_len].decode('ascii'))
+                offset += label_len
+            return ".".join(labels)
+            
+        elif qtype == 1:  # A
+            ip_bytes = response[offset:offset+4]
+            if len(ip_bytes) != 4:
+                raise SystemExit(1)
+            return f"{ip_bytes[0]}.{ip_bytes[1]}.{ip_bytes[2]}.{ip_bytes[3]}"
+            
+        else:
+            raise SystemExit(1)
+            
+    except (IndexError, ValueError, AttributeError, UnicodeDecodeError):
+        # On any parsing error, raise SystemExit(1)
+        raise SystemExit(1)
 
 def send_smtp_email(ip, sender, recipient, subject, body):
     """
